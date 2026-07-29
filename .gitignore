@@ -1,0 +1,22 @@
+# 비밀 정보 — 절대 커밋 금지
+.env
+
+# 조회할 계정 목록 — 어떤 계정을 보고 있는지는 공유하지 않는다.
+# 형식만 알 수 있게 예시 파일 하나만 남긴다.
+input/*
+!input/accounts.example.csv
+
+# 중간 결과 — crawling.py 를 다시 돌리면 만들어진다
+data/
+
+# 최종 데이터셋 — 미디어 파일은 용량이 크고, 수집한 내용도 공유 대상이 아니다
+output/
+
+# 파이썬 캐시
+__pycache__/
+*.pyc
+
+# OS / 에디터
+.DS_Store
+.vscode/
+.claude/
