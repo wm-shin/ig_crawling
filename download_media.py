@@ -26,6 +26,12 @@
                   thumbnail_url      → images/{media_id}_cover.jpg  (표지 사진)
                   thumbnail_url 컬럼이 없는 옛 CSV 는 표지 없이 영상만 받는다.
 
+                  저작권 음원이 포함된 영상은 API 가 media_url 을 아예 비워서
+                  준다 (실측 영상 569건 중 76건, 13%). thumbnail_url 은 정상이라
+                  표지는 받아지지만 영상은 받을 방법이 없다. 이런 행은 "주소
+                  없음(no_url)"으로 집계하고, 영상을 확보하지 못했으므로
+                  dataset.csv 에는 넣지 않는다. 재수집해도 해결되지 않는다.
+
 주소는 며칠이면 만료되므로, 받기 전에 만료 여부를 먼저 확인합니다(is_expired).
 같은 파일을 두 번 받지 않도록 주소 전체가 아니라 파일 이름으로 중복을 판단합니다
 — 같은 파일이라도 요청할 때마다 주소 뒤의 서명 값이 달라지기 때문입니다.
@@ -121,9 +127,16 @@ def url_basename(url: str) -> str:
 
 
 def url_ext(url: str) -> str:
-    """주소의 확장자로 사진인지 영상인지 가릅니다. 확장자가 없으면 ".jpg" 로 봅니다."""
+    """저장할 확장자를 정합니다. 영상(.mp4)만 구분하고 이미지는 전부 ".jpg" 입니다.
+
+    주소 경로의 확장자는 업로드된 "원본" 파일 기준이라 .heic(아이폰 원본)나
+    .webp 가 섞여 있습니다. 하지만 주소에 붙은 stp=dst-jpg 값이 CDN 에게
+    JPEG 로 변환해 보내라는 지시여서, 실제 받는 내용물은 항상 JPEG 입니다.
+    경로의 확장자를 그대로 쓰면 내용은 JPEG 인데 이름만 .heic 인 파일이
+    생기므로, 경로로는 영상 여부만 가리고 이미지는 .jpg 로 통일합니다.
+    """
     ext = os.path.splitext(urlparse(url).path)[1].lower()
-    return ext if ext else ".jpg"
+    return ".mp4" if ext == ".mp4" else ".jpg"
 
 
 def is_expired(url: str) -> bool:
@@ -144,11 +157,17 @@ def is_expired(url: str) -> bool:
 def download(url: str, dest_path: str) -> str:
     """파일 하나를 내려받아 dest_path 에 저장합니다. 이미 있으면 건너뜁니다.
 
-    반환값은 아래 넷 중 하나이며, main() 의 집계 딕셔너리 키와 같습니다.
-    "ok"(받음) / "skip"(이미 있음) / "expired"(주소 만료) / "fail"(재시도해도 실패)
+    반환값은 아래 다섯 중 하나이며, main() 의 집계 딕셔너리 키와 같습니다.
+    "ok"(받음) / "skip"(이미 있음) / "no_url"(주소 없음) / "expired"(주소 만료)
+    / "fail"(재시도해도 실패)
     """
     if os.path.exists(dest_path) and os.path.getsize(dest_path) > 0:
         return "skip"
+    if not url:
+        # 저작권 음원이 포함된 영상은 API 가 media_url 을 주지 않는다 (파일 맨 위
+        # 설명 참고). 빈 주소로 요청하면 어차피 실패하는데 재시도 3회에 6초를
+        # 낭비하고, "다시 실행하면 된다"는 fail 로 잘못 집계되므로 여기서 가른다.
+        return "no_url"
     if is_expired(url):
         return "expired"
 
@@ -296,7 +315,7 @@ def main() -> None:
     print(f"게시물 {len(rows)}개 처리 시작")
     print(f"  중단하려면 {keys} — 받은 것은 저장되고 다시 실행하면 이어집니다\n")
 
-    stats: dict[str, int] = {"ok": 0, "skip": 0, "fail": 0, "expired": 0}
+    stats: dict[str, int] = {"ok": 0, "skip": 0, "fail": 0, "expired": 0, "no_url": 0}
     # 받아야 할 파일을 하나도 빠짐없이 확보한 행만 dataset.csv 로 나간다
     done_rows: list[dict[str, str]] = []
 
@@ -313,14 +332,14 @@ def main() -> None:
             for url, dest in tasks:
                 result = download(url, dest)
                 stats[result] += 1
-                if result in ("fail", "expired"):
+                if result in ("fail", "expired", "no_url"):
                     row_ok = False
             if row_ok:
                 done_rows.append(dataset_row(row, tasks))
             done_count = i
             if i % 20 == 0 or i == len(rows):
                 print(f"  진행 {i}/{len(rows)} | 다운로드 {stats['ok']}  스킵 {stats['skip']}  "
-                      f"만료 {stats['expired']}  실패 {stats['fail']}")
+                      f"만료 {stats['expired']}  주소없음 {stats['no_url']}  실패 {stats['fail']}")
     except KeyboardInterrupt:
         interrupted = True
         how = "q 입력" if _stop_event.is_set() else "Ctrl+C"
@@ -328,7 +347,7 @@ def main() -> None:
 
     print("\n================ " + ("중단됨" if interrupted else "완료") + " ================")
     print(f"다운로드: {stats['ok']}  |  이미 존재(스킵): {stats['skip']}")
-    print(f"URL 만료: {stats['expired']}  |  실패: {stats['fail']}")
+    print(f"URL 만료: {stats['expired']}  |  주소 없음: {stats['no_url']}  |  실패: {stats['fail']}")
     print(f"완료 게시물: {len(done_rows)}/{len(rows)}")
     print(f"저장 위치: {os.path.relpath(OUTPUT_DIR, ROOT_DIR)}")
 
@@ -349,6 +368,12 @@ def main() -> None:
             print(
                 "※ 만료(expired)는 주소 자체가 죽은 것이라 다시 실행해도 계속 실패합니다.\n"
                 "   crawling.py 를 다시 돌려 새 주소를 받은 뒤 다운로드하세요."
+            )
+        if stats["no_url"]:
+            print(
+                "※ 주소 없음(no_url)은 저작권 음원이 포함된 영상이라 API 가 영상 주소를\n"
+                "   주지 않는 경우입니다. 재실행해도, 다시 수집해도 받을 수 없습니다 —\n"
+                "   표지만 받아지고 그 행은 dataset.csv 에 들어가지 않습니다."
             )
 
 
